@@ -33,8 +33,8 @@ DEFAULT_SETTINGS = {
     'categories': ['Others', 'Amazon Connect', 'Agent desktop', 'Network / connectivity', 'Reset SharePoint/Knowledge Folder Password', 'Cisco voice / telephony'],
     'domains': ['UAT', 'PROD', 'Corporate', 'Others'],
     'severities': ['Medium', 'Low', 'High', 'Critical'],
-    'status_labels': {v:v for v in ['New','In Progress','On Hold','Additional Information Requested','Resolved, Pending Confirmation','Closed','Cancelled']},
-    'action_labels': {'note':'Add a note','assign':'Accept / assign technician','decline':'Decline / cancel','hold':'Put on hold','information':'Request information','resume':'Resume work','resolve':'Resolve — request verification','close':'Verify & close'},
+    'status_labels': {v:v for v in ['New','In Progress','On Hold','Pending 3rd Party','Additional Information Requested','Resolved, Pending Confirmation','Closed','Cancelled']},
+    'action_labels': {'note':'Add a note','assign':'Accept / assign technician','decline':'Decline / cancel','hold':'Put on hold','vendor':'Pending 3rd Party','vendor_resume':'Vendor replied — resume work','information':'Request information','resume':'Resume work','resolve':'Resolve — request verification','close':'Verify & close'},
     'fault_templates': {'Others': ''}
 }
 class Setting(Base):
@@ -62,10 +62,13 @@ def settings(session):
     config = json.loads(row.value) if row else json.loads(json.dumps(DEFAULT_SETTINGS))
     legacy = config.get('action_labels', DEFAULT_SETTINGS['action_labels'])
     for role, allowed in [('requester', ['note','close']), ('engineer', list(DEFAULT_SETTINGS['action_labels']))]:
-        config.setdefault(role+'_actions', {key:{'label':legacy[key], 'enabled':True} for key in allowed})
+        config.setdefault(role+'_actions', {key:{'label':legacy.get(key,DEFAULT_SETTINGS['action_labels'][key]), 'enabled':True} for key in allowed})
     for role in ['requester','engineer']:
         config[role+'_actions'].pop('worklog', None)
     config['action_labels'].pop('worklog', None)
+    for key in ('vendor','vendor_resume'):
+        config['engineer_actions'].setdefault(key,{'label':DEFAULT_SETTINGS['action_labels'][key],'enabled':True})
+    config['status_labels'].setdefault('Pending 3rd Party','Pending 3rd Party')
     config['status_labels']['Additional Information Requested'] = 'Pending Customer'
     return config
 
@@ -379,7 +382,7 @@ def action(ticket_id:int, body:Action, user:User=Depends(current_user), session:
     else:
         staff(user)
         if a == 'assign':
-            if ticket.status not in ('New','In Progress','On Hold','Additional Information Requested'):
+            if ticket.status not in ('New','In Progress','On Hold','Pending 3rd Party','Additional Information Requested'):
                 raise HTTPException(409,'Cannot assign in current status')
             assignee = session.get(User,body.assignee_id or user.id)
             if not assignee or assignee.role not in ('infra','infra_tl','infra_manager','admin'):
@@ -397,13 +400,13 @@ def action(ticket_id:int, body:Action, user:User=Depends(current_user), session:
             if ticket.status != 'New' or not text:
                 raise HTTPException(422,'Only new tickets can be declined; reason required')
             ticket.status = 'Cancelled'
-        elif a in ('hold','information','resume','resolve'):
-            allowed = {'hold':['In Progress','Additional Information Requested'], 'information':['New','In Progress','On Hold','Additional Information Requested'], 'resume':['On Hold','Additional Information Requested'], 'resolve':['In Progress','On Hold','Additional Information Requested']}
+        elif a in ('hold','information','resume','resolve','vendor','vendor_resume'):
+            allowed = {'hold':['In Progress','Additional Information Requested'], 'information':['New','In Progress','On Hold','Pending 3rd Party','Additional Information Requested'], 'resume':['On Hold','Additional Information Requested'], 'resolve':['In Progress','On Hold','Pending 3rd Party','Additional Information Requested'],'vendor':['In Progress','On Hold','Additional Information Requested'],'vendor_resume':['Pending 3rd Party']}
             if ticket.status not in allowed[a] or not text:
                 raise HTTPException(422,'Invalid status change or missing reason/resolution')
-            if a == 'resume' and not ticket.assignee_id:
+            if a in ('resume','vendor_resume') and not ticket.assignee_id:
                 raise HTTPException(422,'Assign a technician first')
-            ticket.status = {'hold':'On Hold','information':'Additional Information Requested','resume':'In Progress','resolve':'Resolved, Pending Confirmation'}[a]
+            ticket.status = {'hold':'On Hold','information':'Additional Information Requested','resume':'In Progress','resolve':'Resolved, Pending Confirmation','vendor':'Pending 3rd Party','vendor_resume':'In Progress'}[a]
             if a == 'resolve':
                 ticket.resolution = text
                 ticket.resolved_at = now()
