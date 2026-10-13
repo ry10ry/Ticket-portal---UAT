@@ -298,12 +298,13 @@ class TicketCreate(BaseModel):
     category: str = Field(min_length=1,max_length=80)
     location: str = Field(default='',max_length=100)
     domain: str = Field(min_length=1,max_length=100)
-    severity: str
+    severity: str | None = None
     attachments: list[Upload] = Field(default_factory=list, max_length=5)
 
 @app.post('/api/tickets', dependencies=[Depends(write_guard)])
 def create_ticket(body: TicketCreate, user: User=Depends(current_user), session: Session=Depends(db)):
     config = settings(session)
+    if body.severity is None:body.severity=config['severities'][0]
     if body.severity not in config['severities'] or body.category not in config['categories'] or body.domain not in config['domains']:
         raise HTTPException(422,'Select a valid category, domain and severity')
     ticket = Ticket(**body.model_dump(exclude={'attachments'}), requester_id=user.id)
@@ -366,9 +367,13 @@ def action(ticket_id:int, body:Action, user:User=Depends(current_user), session:
         if not text and not severity_changed:
             raise HTTPException(422,'A comment is required')
         label = settings(session)[role_key][a]['label']
-        if user.role == 'requester' and ticket.status == 'Additional Information Requested':
+        if user.role == 'requester' and ticket.status in ('Additional Information Requested','Resolved, Pending Confirmation'):
+            awaiting_confirmation=ticket.status=='Resolved, Pending Confirmation'
             ticket.status = 'In Progress'
-            record(session,ticket,user.id,'Status','Requester replied — In Progress')
+            if awaiting_confirmation:
+                ticket.resolved_at=None
+                ticket.resolution=None
+            record(session,ticket,user.id,'Status','Requester reported issue persists — In Progress' if awaiting_confirmation else 'Requester replied — In Progress')
         if text:
             record(session,ticket,user.id,'Note', (label+': ' if a.startswith('custom_') else '')+text)
     elif a == 'close':
@@ -443,13 +448,13 @@ def report(month:str,user:User=Depends(current_user),session:Session=Depends(db)
     end -= timedelta(hours=8)
     out=io.StringIO()
     writer=csv.writer(out)
-    writer.writerow(['Reference','Title','Category','Domain','Severity','Status','Requester','Assignee','Created SGT (UTC+8)','First response SGT (UTC+8)','Resolved SGT (UTC+8)','Closed SGT (UTC+8)'])
+    writer.writerow(['Reference','Title','Category','Domain','Status','Requester','Assignee','Created SGT (UTC+8)','First response SGT (UTC+8)','Resolved SGT (UTC+8)','Closed SGT (UTC+8)'])
     def cell(v):
         s=str(v) if v is not None else ''
         return "'"+s if s.lstrip().startswith(('=','+','-','@')) else s
     for t in session.scalars(select(Ticket).where(Ticket.created_at>=start,Ticket.created_at<end)):
         row=serialize(t,session)
-        writer.writerow([cell(v) for v in [row['reference'],t.title,t.category,t.domain,t.severity,settings(session)['status_labels'].get(t.status,t.status),row['requester'],row['assignee'],*[ (v+timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S') if v else '' for v in (t.created_at,t.first_response_at,t.resolved_at,t.closed_at)]]])
+        writer.writerow([cell(v) for v in [row['reference'],t.title,t.category,t.domain,settings(session)['status_labels'].get(t.status,t.status),row['requester'],row['assignee'],*[ (v+timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S') if v else '' for v in (t.created_at,t.first_response_at,t.resolved_at,t.closed_at)]]])
     return Response('\ufeff'+out.getvalue(),media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="MOMCC-faults-{month}.csv"'})
 
 @app.get('/api/settings')
@@ -529,7 +534,7 @@ def edit_user(user_id:int,body:UserEdit,user:User=Depends(current_user),session:
     return {'ok':True}
 
 class SeverityEdit(BaseModel):
-    severity: str
+    severity: str | None = None
 
 @app.post('/api/tickets/{ticket_id}/severity',dependencies=[Depends(write_guard)])
 def edit_severity(ticket_id:int,body:SeverityEdit,user:User=Depends(current_user),session:Session=Depends(db)):
