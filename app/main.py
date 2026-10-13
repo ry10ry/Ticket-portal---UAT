@@ -316,6 +316,7 @@ def create_ticket(body: TicketCreate, user: User=Depends(current_user), session:
     session.flush()
     record(session,ticket,user.id,'Status','Fault reported — New')
     notify(session,ticket,'New fault report: '+ticket.title,[u.id for u in session.scalars(select(User).where(User.role.in_(['infra','infra_tl','infra_manager','admin'])))])
+    enqueue_new_fault(session,ticket,user)
     save_attachments(session,ticket,user,body.attachments)
     return serialize(ticket,session)
 
@@ -587,7 +588,7 @@ def delete_ticket(ticket_id:int,user:User=Depends(current_user),session:Session=
     for row in session.scalars(select(Attachment).where(Attachment.ticket_id==ticket_id)):
         paths.append(UPLOAD_DIR/row.storage_name);session.delete(row)
     session.flush()
-    for model in [Notification,Entry]:
+    for model in [WhatsAppOutbox,Notification,Entry]:
         for row in session.scalars(select(model).where(model.ticket_id==ticket_id)):
             session.delete(row)
     session.flush();session.delete(ticket);session.commit()
@@ -605,3 +606,6 @@ register_services(app)
 
 from app.internal_views import register_internal_views
 register_internal_views(app)
+
+# Register the durable WhatsApp queue before metadata is created at startup.
+from app.waha import WhatsAppOutbox,enqueue_new_fault
