@@ -34,7 +34,7 @@ DEFAULT_SETTINGS = {
     'domains': ['UAT', 'PROD', 'Corporate', 'Others'],
     'severities': ['Medium', 'Low', 'High', 'Critical'],
     'status_labels': {v:v for v in ['New','In Progress','On Hold','Pending 3rd Party','Additional Information Requested','Resolved, Pending Confirmation','Closed','Cancelled']},
-    'action_labels': {'note':'Add a note','assign':'Accept / assign technician','decline':'Decline / cancel','hold':'Put on hold','vendor':'Pending 3rd Party','vendor_resume':'Vendor replied — resume work','information':'Request information','resume':'Resume work','resolve':'Resolve — request verification','close':'Verify & close'},
+    'action_labels': {'note':'Add a note','cancel':'Cancel Ticket','assign':'Accept / assign technician','decline':'Decline / cancel','hold':'Put on hold','vendor':'Pending 3rd Party','vendor_resume':'Vendor replied — resume work','information':'Request information','resume':'Resume work','resolve':'Resolve — request verification','close':'Verify & close'},
     'fault_templates': {'Others': ''}
 }
 class Setting(Base):
@@ -61,13 +61,15 @@ def settings(session):
     row = session.get(Setting, 'portal')
     config = json.loads(row.value) if row else json.loads(json.dumps(DEFAULT_SETTINGS))
     legacy = config.get('action_labels', DEFAULT_SETTINGS['action_labels'])
-    for role, allowed in [('requester', ['note','close']), ('engineer', list(DEFAULT_SETTINGS['action_labels']))]:
+    for role, allowed in [('requester', ['note','close','cancel']), ('engineer', list(DEFAULT_SETTINGS['action_labels']))]:
         config.setdefault(role+'_actions', {key:{'label':legacy.get(key,DEFAULT_SETTINGS['action_labels'][key]), 'enabled':True} for key in allowed})
     for role in ['requester','engineer']:
         config[role+'_actions'].pop('worklog', None)
     config['action_labels'].pop('worklog', None)
     for key in ('vendor','vendor_resume'):
         config['engineer_actions'].setdefault(key,{'label':DEFAULT_SETTINGS['action_labels'][key],'enabled':True})
+    for role in ('requester','engineer'):
+        config[role+'_actions'].setdefault('cancel',{'label':'Cancel Ticket','enabled':True})
     config['status_labels'].setdefault('Pending 3rd Party','Pending 3rd Party')
     config['status_labels']['Additional Information Requested'] = 'Pending Customer'
     return config
@@ -378,6 +380,11 @@ def action(ticket_id:int, body:Action, user:User=Depends(current_user), session:
             record(session,ticket,user.id,'Status','Requester reported issue persists — In Progress' if awaiting_confirmation else 'Requester replied — In Progress')
         if text:
             record(session,ticket,user.id,'Note', (label+': ' if a.startswith('custom_') else '')+text)
+    elif a == 'cancel':
+        if not text:raise HTTPException(422,'Cancellation reason is required')
+        if user.role!='requester':staff(user)
+        ticket.status='Cancelled'
+        record(session,ticket,user.id,'Status','Cancelled: '+text)
     elif a == 'close':
         if ticket.requester_id != user.id:
             raise HTTPException(403,'Only the requester can verify and close')
@@ -481,7 +488,7 @@ def update_settings(body:dict,user:User=Depends(current_user),session:Session=De
     config={k:body.get(k,{}) for k in DEFAULT_SETTINGS}
     config['action_labels']=DEFAULT_SETTINGS['action_labels']
     existing = settings(session)
-    for role, allowed in [('requester', ['note','close']), ('engineer', list(DEFAULT_SETTINGS['action_labels']))]:
+    for role, allowed in [('requester', ['note','close','cancel']), ('engineer', list(DEFAULT_SETTINGS['action_labels']))]:
         key=role+'_actions'
         values=body.get(key, existing[key])
         if not isinstance(values,dict) or any(k not in allowed and not (isinstance(k,str) and k.startswith('custom_') and len(k)<=60) for k in values) or any(not isinstance(v,dict) or not isinstance(v.get('label'),str) or not v['label'].strip() or len(v['label'])>100 or not isinstance(v.get('enabled'),bool) for v in values.values()):
