@@ -15,7 +15,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, select, event
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey, select, event, delete
 from sqlalchemy.orm import declarative_base, Session
 
 def now():
@@ -174,7 +174,9 @@ def current_user(request: Request, session: Session = Depends(db)):
     row = session.get(LoginSession, hashlib.sha256(token.encode()).hexdigest())
     if not row or row.expires < now():
         raise HTTPException(401, 'Please sign in')
-    return session.get(User, row.user_id)
+    user=session.get(User,row.user_id)
+    if not user or user.role=='deleted':raise HTTPException(401,'Please sign in')
+    return user
 
 def write_guard(request: Request):
     if request.headers.get('x-requested-with') != 'ServiceDesk':
@@ -234,7 +236,7 @@ class Login(BaseModel):
 @app.post('/api/login', dependencies=[Depends(write_guard)])
 def login(body: Login, response: Response, session: Session = Depends(db)):
     user = session.scalar(select(User).where(User.email == body.email.lower().strip()))
-    if not user or not check_password(body.password, user.password):
+    if not user or user.role=='deleted' or not check_password(body.password, user.password):
         raise HTTPException(401, 'Invalid email or password')
     token = secrets.token_urlsafe(32)
     session.add(LoginSession(token=hashlib.sha256(token.encode()).hexdigest(), user_id=user.id, expires=now()+timedelta(hours=8)))
@@ -258,7 +260,7 @@ def me(user: User=Depends(current_user)):
 @app.get('/api/users')
 def users(user: User=Depends(current_user), session: Session=Depends(db)):
     staff(user)
-    return [{'id':u.id,'name':u.name,'email':u.email,'role':u.role} for u in session.scalars(select(User))]
+    return [{'id':u.id,'name':u.name,'email':u.email,'role':u.role} for u in session.scalars(select(User).where(User.role!='deleted'))]
 
 class UserCreate(BaseModel):
     name: str = Field(min_length=1,max_length=100)
@@ -516,7 +518,7 @@ def edit_user(user_id:int,body:UserEdit,user:User=Depends(current_user),session:
     if user.role != 'admin':
         raise HTTPException(403,'Administrator access required')
     row=session.get(User,user_id)
-    if not row:
+    if not row or row.role=='deleted':
         raise HTTPException(404,'User not found')
     if body.role not in ('admin','infra','infra_tl','infra_manager','requester') or '@' not in body.email or (body.password and len(body.password)<12):
         raise HTTPException(422,'Invalid role, email or password (minimum 12 characters)')
@@ -530,6 +532,21 @@ def edit_user(user_id:int,body:UserEdit,user:User=Depends(current_user),session:
     for login_session in session.scalars(select(LoginSession).where(LoginSession.user_id==user_id)):
         if body.password or body.role!=user.role or row.id!=user.id:
             session.delete(login_session)
+    session.commit()
+    return {'ok':True}
+
+@app.post('/api/users/{user_id}/delete',dependencies=[Depends(write_guard)])
+def delete_user(user_id:int,user:User=Depends(current_user),session:Session=Depends(db)):
+    if user.role!='admin':raise HTTPException(403,'Administrator access required')
+    if user_id==user.id:raise HTTPException(422,'You cannot delete your own administrator account')
+    # Lock active admins in a consistent order, preventing concurrent cross-deletions.
+    admins=session.scalars(select(User).where(User.role=='admin').order_by(User.id).with_for_update()).all()
+    if not any(u.id==user.id for u in admins):raise HTTPException(403,'Administrator access required')
+    row=session.scalar(select(User).where(User.id==user_id).with_for_update())
+    if not row or row.role=='deleted':raise HTTPException(404,'User not found')
+    if row.role=='admin' and len(admins)<=1:raise HTTPException(422,'At least one administrator must remain')
+    row.role='deleted'
+    session.execute(delete(LoginSession).where(LoginSession.user_id==user_id))
     session.commit()
     return {'ok':True}
 
