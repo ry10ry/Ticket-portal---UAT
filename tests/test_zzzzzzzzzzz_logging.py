@@ -40,13 +40,15 @@ def test_log_redaction_service_files_and_rotation(tmp_path,monkeypatch):
  monkeypatch.setenv('WAHA_API_KEY','sample-private-api-key')
  configure_logging()
  logger=logging.getLogger('servicedesk.scheduler')
- logger.info('Known secret filtered: %s', 'sample-private-api-key')
+ logger.warning('Known secret filtered: %s', 'sample-private-api-key')
+ logger.info('Normal task INFO should not be recorded')
  text=(tmp_path/'scheduler.log').read_text()
+ assert 'Normal task INFO' not in text
  assert 'sample-private-api-key' not in text and '[REDACTED]' in text and 'service=scheduler' in text
  handler=next(h for h in logging.getLogger().handlers if isinstance(h,RotatingFileHandler))
  assert handler.maxBytes==5*1024*1024 and handler.backupCount==5
  handler.maxBytes=512
- for i in range(40):logger.info('Rotation check %s %s',i,'x'*100)
+ for i in range(40):logger.warning('Rotation check %s %s',i,'x'*100)
  assert 1<len(list(tmp_path.glob('scheduler.log*')))<=6
 
 

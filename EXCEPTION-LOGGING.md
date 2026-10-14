@@ -38,3 +38,7 @@ docker compose -f compose.yaml -f compose.override.yaml -f compose.ssl.yaml logs
 ```
 
 If an error occurs after a streaming response has already begun, its existing request ID and exception are logged, but the server cannot replace the already-started download with a JSON error. Logging records a failure; it does not guarantee recovery from infrastructure or disk failures.
+
+## Warning and Error only
+
+The application file and console handlers now use WARNING as the minimum level. INFO and DEBUG request summaries, startup-complete messages, successful WhatsApp sends and normal scheduler checks are omitted. WARNING, ERROR and CRITICAL records remain, including exception frames and request references. The log files are still created on startup even when empty. Docker/Nginx output produced outside Python logging is separate. Replace app/logging_support.py and rebuild web/scheduler; no Compose or database change is needed.

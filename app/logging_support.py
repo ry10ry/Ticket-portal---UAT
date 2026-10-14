@@ -49,15 +49,15 @@ class SafeFormatter(logging.Formatter):
 
 def configure_logging():
     service='scheduler' if os.environ.get('LOG_SERVICE')=='scheduler' else 'web'
-    root=logging.getLogger();root.setLevel(logging.INFO)
+    root=logging.getLogger();root.setLevel(logging.WARNING)
     for handler in list(root.handlers):
         if getattr(handler,'servicedesk_handler',False):root.removeHandler(handler);handler.close()
     formatter=SafeFormatter('%(asctime)s %(levelname)s service='+service+' request_id=%(request_id)s %(name)s: %(message)s')
-    console=logging.StreamHandler(sys.stderr);console.servicedesk_handler=True;console.setFormatter(formatter);root.addHandler(console)
+    console=logging.StreamHandler(sys.stderr);console.servicedesk_handler=True;console.setLevel(logging.WARNING);console.setFormatter(formatter);root.addHandler(console)
     try:
         directory=Path(os.environ.get('LOG_DIR','/tmp/momcc-logs'));directory.mkdir(parents=True,exist_ok=True)
         handler=RotatingFileHandler(directory/(service+'.log'),maxBytes=5*1024*1024,backupCount=5,encoding='utf-8',delay=False)
-        handler.servicedesk_handler=True;handler.setFormatter(formatter);root.addHandler(handler)
+        handler.servicedesk_handler=True;handler.setLevel(logging.WARNING);handler.setFormatter(formatter);root.addHandler(handler)
     except OSError:
         root.warning('File logging unavailable; check LOG_DIR permissions. Console logging remains available.')
     # Route Uvicorn lifecycle/errors through the same safe formatter. HTTP access
