@@ -7,6 +7,9 @@ import hmac
 import io
 import os
 import secrets
+import logging
+from app.logging_support import configure_logging,RequestLoggingMiddleware
+configure_logging()
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,7 +24,7 @@ from sqlalchemy.orm import declarative_base, Session
 def now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
-engine = create_engine(os.environ.get('DATABASE_URL', 'mysql+pymysql://servicedesk:change-me@db/servicedesk?charset=utf8mb4'), pool_pre_ping=True, pool_recycle=1800)
+engine = create_engine(os.environ.get('DATABASE_URL', 'mysql+pymysql://servicedesk:change-me@db/servicedesk?charset=utf8mb4'), pool_pre_ping=True, pool_recycle=1800, hide_parameters=True)
 if engine.dialect.name == 'sqlite':
     @event.listens_for(engine, 'connect')
     def foreign_keys(conn, _):
@@ -214,17 +217,23 @@ def auto_close(session):
 
 @asynccontextmanager
 async def lifespan(app):
-    Base.metadata.create_all(engine)
-    with Session(engine) as session:
-        if not session.scalar(select(User).limit(1)):
-            password = os.environ.get('ADMIN_PASSWORD', '')
-            if len(password) < 12:
-                raise RuntimeError('Set ADMIN_PASSWORD to at least 12 characters')
-            session.add(User(name='ServiceDesk Administrator', email=os.environ.get('ADMIN_EMAIL','admin@example.com'), password=hash_password(password), role='admin'))
-            session.commit()
+    try:
+        Base.metadata.create_all(engine)
+        with Session(engine) as session:
+            if not session.scalar(select(User).limit(1)):
+                password = os.environ.get('ADMIN_PASSWORD', '')
+                if len(password) < 12:
+                    raise RuntimeError('Set ADMIN_PASSWORD to at least 12 characters')
+                session.add(User(name='ServiceDesk Administrator', email=os.environ.get('ADMIN_EMAIL','admin@example.com'), password=hash_password(password), role='admin'))
+                session.commit()
+    except Exception:
+        logging.getLogger('servicedesk.startup').exception('Application database initialization failed')
+        raise
+    logging.getLogger('servicedesk.startup').info('Application startup complete')
     yield
 
 app = FastAPI(title='MOMCC ServiceDesk', lifespan=lifespan)
+app.add_middleware(RequestLoggingMiddleware)
 app.mount('/static', StaticFiles(directory=Path(__file__).parent/'static'), name='static')
 
 @app.get('/')

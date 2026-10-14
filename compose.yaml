@@ -1,3 +1,8 @@
+x-service-logging: &service_logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 services:
   db:
     image: mysql:8.4
@@ -16,8 +21,11 @@ services:
     restart: unless-stopped
   web:
     build: .
+    logging: *service_logging
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - ./logs:/data/logs
     environment: &app_env
       DATABASE_URL: mysql+pymysql://servicedesk:${MYSQL_PASSWORD}@db/servicedesk?charset=utf8mb4
       ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL}
@@ -29,14 +37,20 @@ services:
       WAHA_SESSION: ${WAHA_SESSION:-default}
       WAHA_GROUP_CHAT_ID: ${WAHA_GROUP_CHAT_ID:-}
       PORTAL_URL: ${PORTAL_URL:-}
+      LOG_DIR: /data/logs
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
   scheduler:
     build: .
+    logging: *service_logging
     command: ["python", "-m", "app.scheduler"]
-    environment: *app_env
+    environment:
+      <<: *app_env
+      LOG_SERVICE: scheduler
+    volumes:
+      - ./logs:/data/logs
     depends_on:
       db:
         condition: service_healthy
