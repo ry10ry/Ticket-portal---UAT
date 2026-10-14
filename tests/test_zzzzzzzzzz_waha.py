@@ -37,6 +37,10 @@ def test_waha_only_new_fault_transaction_delivery_retry_and_delete(monkeypatch):
   calls=[]
   def fail(*args):calls.append(args);raise OSError('failure')
   monkeypatch.setattr(waha,'send_text',fail)
+  # MySQL DATETIME may round the initial timestamp to the next second.
+  # Make this delivery explicitly due rather than depending on test speed.
+  with Session(engine) as s:
+   s.get(WhatsAppOutbox,queue_id).next_attempt_at=now()-timedelta(seconds=1);s.commit()
   assert process_outbox(engine)==1
   with Session(engine) as s:
    row=s.get(WhatsAppOutbox,queue_id)

@@ -41,7 +41,8 @@ def register_internal_views(app):
         history_model=CRHistory if kind=='cr' else SRHistory
         history_key=history_model.cr_id if kind=='cr' else history_model.sr_id
         headers=['CR Number','Status','Raised By','Background / Reason for Change','Scope of Change','Created SGT','Updated SGT','TL Supported By','TL Supported SGT','Approved By','Approved SGT','Uploaded Documents','Workflow Approval Records'] if kind=='cr' else ['SR Number','Status','Raised By','Subject','Description','Created SGT','Updated SGT','First Submitted SGT','Approved By','Approved SGT','Active Attachments']
-        writer.writerow(headers)
+        from app.archive import fields
+        writer.writerow(headers+['Archive State','Archive Path'])
         for row in s.scalars(select(model).where(model.created_at>=start,model.created_at<end).order_by(model.id)):
             history=s.scalars(select(history_model).where(history_key==row.id).order_by(history_model.id)).all()
             submission=next((i for i in range(len(history)-1,-1,-1) if history[i].action=='submit'),len(history))
@@ -59,5 +60,5 @@ def register_internal_views(app):
             else:
                 files=s.scalars(select(SRFile.filename).where(SRFile.sr_id==row.id,SRFile.active==True)).all()
                 values += [row.subject,row.description,local(row.created_at),local(row.updated_at),local(row.first_submitted_at),actor(approval),local(approval.created_at if approval else None),'; '.join(files)]
-            writer.writerow([safe(v) for v in values])
+            writer.writerow([safe(v) for v in values+fields(s,kind.upper(),row.id)])
         return Response('\ufeff'+output.getvalue(),media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="MOMCC-{kind.upper()}-{month}.csv"','Cache-Control':'no-store'})

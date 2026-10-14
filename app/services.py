@@ -76,9 +76,12 @@ def get_sr(s,id):
     if not r:raise HTTPException(404,'Service request not found')
     return r
 def files(s,id):
-    return [dict(id=f.id,filename=f.filename,size=len(f.data),preview=f.mime.startswith('image/')) for f in s.scalars(select(SRFile).where(SRFile.sr_id==id,SRFile.active==True).order_by(SRFile.id))]
+    from app.archive import file_size
+    return [dict(id=f.id,filename=f.filename,size=file_size(s,'SR',f.id,f.data),preview=f.mime.startswith('image/')) for f in s.scalars(select(SRFile).where(SRFile.sr_id==id,SRFile.active==True).order_by(SRFile.id))]
 def serialize(s,r,detail=False):
     data={c.name:getattr(r,c.name) for c in ServiceRequest.__table__.columns};data['owner']=s.get(User,r.owner_id).name
+    from app.archive import fields
+    data['archive_state'],data['archive_path']=fields(s,'SR',r.id)
     if detail:
         data['files']=files(s,r.id)
         data['history']=[dict(id=h.id,action=h.action,comment=h.comment,actor=s.get(User,h.actor_id).name,created_at=h.created_at,snapshot=__import__('json').loads(h.snapshot)) for h in s.scalars(select(SRHistory).where(SRHistory.sr_id==r.id).order_by(SRHistory.id))]
@@ -87,6 +90,9 @@ def audit(s,r,u,action,comment=''):
     import json
     s.add(SRHistory(sr_id=r.id,actor_id=u.id,action=action,comment=comment,snapshot=json.dumps(dict(subject=r.subject,description=r.description,status=r.status,version=r.version,files=files(s,r.id),_actor=dict(name=u.name,email=u.email,role=u.role)))))
 def mutate(s,r,version,**values):
+    from app.archive import writable
+    s.refresh(r,with_for_update=True)
+    writable(s,'SR',r.id)
     result=s.execute(update(ServiceRequest).where(ServiceRequest.id==r.id,ServiceRequest.version==version).values(**values,version=version+1,updated_at=now()))
     if result.rowcount!=1:s.rollback();raise HTTPException(409,'SR changed. Reload before saving or approving.')
     s.refresh(r)
@@ -134,6 +140,9 @@ def register_services(app):
         history=s.scalars(select(SRHistory).where(SRHistory.sr_id==id).order_by(SRHistory.id)).all()
         attachments=s.scalars(select(SRFile).where(SRFile.sr_id==id,SRFile.active==True).order_by(SRFile.id)).all()
         submission,approval=current_approval(r,history,attachments)
+        from types import SimpleNamespace
+        from app.archive import file_bytes
+        attachments=[SimpleNamespace(id=f.id,filename=f.filename,mime=f.mime,data=file_bytes(s,'SR',f.id,f.data)) for f in attachments]
         payload,filename=draft_message(r,submission,approval,attachments,s.get(User,approval.actor_id),s.get(User,r.owner_id))
         return Response(payload,media_type='message/rfc822',headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(filename,safe=''),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
     @app.get('/api/services/{id}/files/{file_id}')
@@ -141,7 +150,8 @@ def register_services(app):
         staff(u);get_sr(s,id);f=s.get(SRFile,file_id)
         if not f or f.sr_id!=id:raise HTTPException(404,'Attachment not found')
         inline=preview and f.mime.startswith('image/')
-        return Response(f.data,media_type=f.mime if inline else 'application/octet-stream',headers={'Content-Disposition':('inline' if inline else 'attachment')+"; filename*=UTF-8''"+quote(f.filename,safe=''),'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'})
+        from app.archive import file_bytes
+        return Response(file_bytes(s,'SR',f.id,f.data),media_type=f.mime if inline else 'application/octet-stream',headers={'Content-Disposition':('inline' if inline else 'attachment')+"; filename*=UTF-8''"+quote(f.filename,safe=''),'X-Content-Type-Options':'nosniff','Cache-Control':'no-store'})
     @app.post('/api/services/{id}/delete',dependencies=[Depends(write_guard)])
     def remove(id:int,b:Delete,u:User=Depends(current_user),s:Session=Depends(db)):
         if u.role!='admin':raise HTTPException(403,'Administrator access required')

@@ -294,6 +294,8 @@ def create_user(body: UserCreate, user: User=Depends(current_user), session: Ses
 
 def serialize(ticket, session):
     result = {c.name:getattr(ticket,c.name) for c in Ticket.__table__.columns}
+    from app.archive import fields
+    result['archive_state'],result['archive_path']=fields(session,'FAULT',ticket.id)
     result['reference'] = f'MOMCC-{ticket.id:06d}'
     result['requester'] = session.get(User,ticket.requester_id).name
     result['assignee'] = session.get(User,ticket.assignee_id).name if ticket.assignee_id else 'Unassigned'
@@ -349,6 +351,8 @@ class Action(BaseModel):
 def action(ticket_id:int, body:Action, user:User=Depends(current_user), session:Session=Depends(db)):
     ticket = view_ticket(session,user,ticket_id)
     session.refresh(ticket,with_for_update=True)
+    from app.archive import writable
+    writable(session,'FAULT',ticket.id)
     if user.role == 'requester' and ticket.requester_id != user.id:
         raise HTTPException(403, 'You can only update tickets you reported')
     closed_infra_comment = ticket.status == 'Closed' and user.role == 'infra' and body.action == 'note'
@@ -467,13 +471,13 @@ def report(month:str,user:User=Depends(current_user),session:Session=Depends(db)
     end -= timedelta(hours=8)
     out=io.StringIO()
     writer=csv.writer(out)
-    writer.writerow(['Reference','Title','Category','Domain','Status','Requester','Assignee','Created SGT (UTC+8)','First response SGT (UTC+8)','Resolved SGT (UTC+8)','Closed SGT (UTC+8)'])
+    writer.writerow(['Reference','Title','Category','Domain','Status','Requester','Assignee','Created SGT (UTC+8)','First response SGT (UTC+8)','Resolved SGT (UTC+8)','Closed SGT (UTC+8)','Archive State','Archive Path'])
     def cell(v):
         s=str(v) if v is not None else ''
         return "'"+s if s.lstrip().startswith(('=','+','-','@')) else s
     for t in session.scalars(select(Ticket).where(Ticket.created_at>=start,Ticket.created_at<end)):
         row=serialize(t,session)
-        writer.writerow([cell(v) for v in [row['reference'],t.title,t.category,t.domain,settings(session)['status_labels'].get(t.status,t.status),row['requester'],row['assignee'],*[ (v+timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S') if v else '' for v in (t.created_at,t.first_response_at,t.resolved_at,t.closed_at)]]])
+        writer.writerow([cell(v) for v in [row['reference'],t.title,t.category,t.domain,settings(session)['status_labels'].get(t.status,t.status),row['requester'],row['assignee'],*[ (v+timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S') if v else '' for v in (t.created_at,t.first_response_at,t.resolved_at,t.closed_at)],row['archive_state'],row['archive_path']]])
     return Response('\ufeff'+out.getvalue(),media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="MOMCC-faults-{month}.csv"'})
 
 @app.get('/api/settings')
@@ -519,7 +523,12 @@ def download_attachment(attachment_id:int,user:User=Depends(current_user),sessio
     if not row:
         raise HTTPException(404,'Attachment not found')
     view_ticket(session,user,row.ticket_id)
-    path=UPLOAD_DIR/row.storage_name
+    from app.archive import saved_path
+    online=UPLOAD_DIR/row.storage_name
+    try:path=saved_path(session,'FAULT',row.id) or online
+    except HTTPException:
+        if not online.is_file():raise
+        path=online
     if not path.is_file():
         raise HTTPException(404,'Attachment file is unavailable')
     return FileResponse(path,filename=row.filename,media_type='application/octet-stream',headers={'X-Content-Type-Options':'nosniff'})
@@ -575,6 +584,8 @@ def edit_severity(ticket_id:int,body:SeverityEdit,user:User=Depends(current_user
     staff(user)
     ticket=view_ticket(session,user,ticket_id)
     session.refresh(ticket,with_for_update=True)
+    from app.archive import writable
+    writable(session,'FAULT',ticket.id)
     if ticket.status == 'Closed' and user.role == 'infra':
         raise HTTPException(403, 'Closed tickets allow comments only')
     if body.severity not in settings(session)['severities']:
@@ -593,6 +604,8 @@ def delete_ticket(ticket_id:int,user:User=Depends(current_user),session:Session=
         raise HTTPException(403,'Administrator access required')
     ticket=view_ticket(session,user,ticket_id)
     session.refresh(ticket,with_for_update=True)
+    from app.archive import writable
+    writable(session,'FAULT',ticket.id)
     paths=[]
     for row in session.scalars(select(Attachment).where(Attachment.ticket_id==ticket_id)):
         paths.append(UPLOAD_DIR/row.storage_name);session.delete(row)
@@ -618,3 +631,6 @@ register_internal_views(app)
 
 # Register the durable WhatsApp queue before metadata is created at startup.
 from app.waha import WhatsAppOutbox,enqueue_new_fault
+
+from app.archive import register as register_archive
+register_archive(app)

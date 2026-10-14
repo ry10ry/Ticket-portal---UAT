@@ -18,4 +18,8 @@ while True:
         last_close=time.monotonic()
     try:process_outbox(engine)
     except Exception:logger.exception('WhatsApp queue processing failed; retrying next cycle')
+    try:
+        from app.archive import daily
+        daily(engine)
+    except Exception:logger.exception('Archive task failed; online files retained')
     time.sleep(10)

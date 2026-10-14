@@ -26,6 +26,7 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ./logs:/data/logs
+      - ${ARCHIVE_HOST_PATH:-./MOMCC_Archive}:/data/archive
     environment: &app_env
       DATABASE_URL: mysql+pymysql://servicedesk:${MYSQL_PASSWORD}@db/servicedesk?charset=utf8mb4
       ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL}
@@ -38,6 +39,9 @@ services:
       WAHA_GROUP_CHAT_ID: ${WAHA_GROUP_CHAT_ID:-}
       PORTAL_URL: ${PORTAL_URL:-}
       LOG_DIR: /data/logs
+      ARCHIVE_ROOT: /data/archive
+      ARCHIVE_ENABLED: ${ARCHIVE_ENABLED:-false}
+      ARCHIVE_PURGE_ENABLED: ${ARCHIVE_PURGE_ENABLED:-false}
     depends_on:
       db:
         condition: service_healthy
@@ -51,6 +55,7 @@ services:
       LOG_SERVICE: scheduler
     volumes:
       - ./logs:/data/logs
+      - ${ARCHIVE_HOST_PATH:-./MOMCC_Archive}:/data/archive
     depends_on:
       db:
         condition: service_healthy

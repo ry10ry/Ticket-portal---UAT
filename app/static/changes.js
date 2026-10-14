@@ -2,7 +2,7 @@ function filterCRRows(){const q=crSearch.trim().toLowerCase();let visible=0;docu
 /* Internal change management. Server enforces every role and transition. */
 let crCurrent, crFilter='',crSearch='', crFormSchema;
 const crLabels={infra:'MOMCC Infra',infra_tl:'MOMCC Infra TL',infra_manager:'MOMCC Infra Manager',admin:'Administrator'};
-const crCanEdit=r=>r.status==='In-progress'&&(r.owner_id===me.id||me.role==='admin');
+const crCanEdit=r=>!r.archive_state&&r.status==='In-progress'&&(r.owner_id===me.id||me.role==='admin');
 function crDate(value){return value?new Date(value).toLocaleString('en-SG',{timeZone:'Asia/Singapore',dateStyle:'medium',timeStyle:'short'}):'—'}
 function crLocal(value){if(!value)return '';return new Date(new Date(value).getTime()+8*3600000).toISOString().slice(0,16)}
 function crSummary(r,i=1){const c=r.content;return `<tr><td>${i}</td><td>${escape(c.environment)}</td><td>${escape(r.number)}</td><td>${escape(c.description)}</td><td>${crDate(c.deployment_start)} – ${crDate(c.deployment_end)}</td><td>${escape(c.impact)}</td></tr>`}
@@ -25,7 +25,7 @@ function openRaiseCR(){
 }
 const crDialog=document.createElement('dialog');crDialog.id='crDialog';crDialog.className='detail cr-dialog';document.body.append(crDialog);
 
-const crCanClose=r=>r.status==='Approved'&&(r.owner_id===me.id||me.role==='admin');
+const crCanClose=r=>!r.archive_state&&r.status==='Approved'&&(r.owner_id===me.id||me.role==='admin');
 const crKinds={change_form:'CR Form',runbook:'Runbook',checklist:'Checklist-RFC-Impact'};
 async function openCR(id){
  const r=await api('/changes/'+id);crCurrent=r;const editable=crCanEdit(r);
@@ -38,7 +38,7 @@ async function openCR(id){
  const stage=r.active_stage;if(stage&&[stage.role,'admin'].includes(me.role)&&(r.owner_id!==me.id||me.role==='admin'))buttons.push([stage.action,stage.label],['return','Return to Infra']);
  $('#crActions').innerHTML=buttons.map(([a,label])=>`<button type="button" data-cr-action="${a}" class="${a==='return'?'secondary':''}">${label}</button>`).join('');
  document.querySelectorAll('[data-cr-action]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{const action=b.dataset.crAction;let reason='';if(action==='close'&&!confirm('Confirm the uploaded Email or document records approval and completion of this change. Close this CR?'))return;if(action==='return'){reason=prompt('Comment / reason for returning this CR:');if(reason===null)return;if(!reason.trim())throw Error('Return reason is required')}if(action==='submit')await saveCR();await api('/changes/'+id+'/actions',{version:crCurrent.version,action,reason});if(['submit','close'].includes(action))crDialog.close();else await openCR(id);await renderChanges();toast('CR updated')}catch(e){toast(e.message)}finally{b.disabled=false}});
- $('#crComment').onsubmit=async e=>{e.preventDefault();try{await api('/changes/'+id+'/actions',{version:crCurrent.version,action:'comment',reason:e.target.elements.reason.value});await openCR(id);await renderChanges();toast('Comment added')}catch(x){toast(x.message)}};
+ $('#crComment').hidden=!!r.archive_state;if($('#deleteCR'))$('#deleteCR').hidden=!!r.archive_state;$('#crComment').onsubmit=async e=>{e.preventDefault();try{await api('/changes/'+id+'/actions',{version:crCurrent.version,action:'comment',reason:e.target.elements.reason.value});await openCR(id);await renderChanges();toast('Comment added')}catch(x){toast(x.message)}};
  if(me.role==='admin')$('#deleteCR').onclick=async()=>{if(!confirm('Permanently delete '+r.number+' including all uploaded files and history?'))return;try{await api('/changes/'+id+'/delete',{version:crCurrent.version,action:'comment'});crDialog.close();await renderChanges();toast('CR deleted')}catch(x){toast(x.message)}};
  if(!crDialog.open)crDialog.showModal();
 }

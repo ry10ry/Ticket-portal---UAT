@@ -89,7 +89,8 @@ class CRUpload(BaseModel):
 
 
 def file_list(session, cr_id):
-    return [dict(id=f.id,kind=f.kind,filename=f.filename,size=len(f.data),version=f.version,
+    from app.archive import file_size as archive_size
+    return [dict(id=f.id,kind=f.kind,filename=f.filename,size=archive_size(session,'CR',f.id,f.data),version=f.version,
         created_at=f.created_at) for f in session.scalars(select(CRFile).where(CRFile.cr_id==cr_id).order_by(CRFile.id))]
 
 
@@ -150,6 +151,8 @@ def read_cr(session, cr_id):
 
 def serialize_cr(row, session, detail=False):
     result = {c.name: getattr(row, c.name) for c in ChangeRequest.__table__.columns}
+    from app.archive import fields
+    result['archive_state'],result['archive_path']=fields(session,'CR',row.id)
     result['content'] = json.loads(row.content)
     result['document_names'] = names(row.number, result['content'].get('description',''))
     result['files'] = list(latest_files(session,row.id).values())
@@ -175,6 +178,9 @@ def audit(session, row, user, action, reason='', stage=None):
 
 
 def mutate(session, row, version, **values):
+    from app.archive import writable
+    session.refresh(row,with_for_update=True)
+    writable(session,'CR',row.id)
     # Compare-and-swap also protects SQLite, where SELECT FOR UPDATE is ignored.
     changed = session.execute(update(ChangeRequest).where(ChangeRequest.id==row.id,
         ChangeRequest.version==version).values(**values, version=version+1, updated_at=now()))
@@ -199,7 +205,9 @@ def register_changes(app):
             file=session.get(CRFile,file_ids[kind])
             if not file or file.cr_id!=row.id or file.kind!=kind:
                 raise HTTPException(409,'Approved document is no longer available')
-            files.append(file)
+            from types import SimpleNamespace
+            from app.archive import file_bytes
+            files.append(SimpleNamespace(kind=file.kind,filename=file.filename,data=file_bytes(session,'CR',file.id,file.data)))
         decisions=approval_decisions(history)
         identities={h.actor_id:session.get(User,h.actor_id) for h in decisions}
         payload,filename=draft_message(row,submission,support,approval,files,identities,decisions)
@@ -222,7 +230,8 @@ def register_changes(app):
         file=session.get(CRFile,current['id'])
         filename=file.filename
         mime='application/vnd.openxmlformats-officedocument.'+('wordprocessingml.document' if kind=='change_form' else 'spreadsheetml.sheet')
-        return Response(file.data,media_type=mime,headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(filename,safe=''), 'Cache-Control':'no-store'})
+        from app.archive import file_bytes
+        return Response(file_bytes(session,'CR',file.id,file.data),media_type=mime,headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(filename,safe=''), 'Cache-Control':'no-store'})
 
     @app.get('/api/changes/{cr_id}/templates/{kind}')
     def template_download(cr_id:int,kind:str,user:User=Depends(current_user),session:Session=Depends(db)):
@@ -238,7 +247,8 @@ def register_changes(app):
         read_cr(session,cr_id)
         file=session.get(CRFile,file_id)
         if not file or file.cr_id!=cr_id:raise HTTPException(404,'File not found')
-        return Response(file.data,media_type='application/octet-stream',headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(file.filename,safe=''),'Cache-Control':'no-store'})
+        from app.archive import file_bytes
+        return Response(file_bytes(session,'CR',file.id,file.data),media_type='application/octet-stream',headers={'Content-Disposition':"attachment; filename*=UTF-8''"+quote(file.filename,safe=''),'Cache-Control':'no-store'})
 
     @app.post('/api/changes/{cr_id}/delete',dependencies=[Depends(write_guard)])
     def delete_change(cr_id:int,body:CRAction,user:User=Depends(current_user),session:Session=Depends(db)):

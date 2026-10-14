@@ -2,3 +2,9 @@
 /logs/
 __pycache__/
 *.pyc
+
+/MOMCC_Archive/
+
+.env
+.env.*
+!.env.example
