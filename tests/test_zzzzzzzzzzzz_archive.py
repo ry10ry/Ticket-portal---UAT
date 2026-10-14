@@ -103,6 +103,31 @@ def test_complete_offline_archives_verified_cleanup_and_reports(tmp_path,monkeyp
   assert admin.get('/api/changes').status_code==200
   assert admin.get('/api/services').status_code==200
   assert admin.get('/api/report?month=2024-01').status_code==200
+  # Export all types to removable storage and disconnect it. Docker keeps only
+  # the local staging mount, while lookup/report metadata stays in the DB.
+  import shutil
+  import app.archive as archive
+  monkeypatch.setenv('ARCHIVE_ROOT',str(root))
+  external=tmp_path/'external';shutil.copytree(root,external)
+  receipt={'target':(root/MARKER).read_text(),'location':str(external),'records':[]}
+  with Session(engine) as s:
+   for row in s.scalars(select(ArchiveRecord)):
+    receipt['records'].append({'folder':row.folder,'manifest_sha256':archive.digest(external/row.folder/'manifest.json')})
+  assert len(archive.finish_export(engine,receipt))==3
+  assert archive.finish_export(engine,receipt)==[]
+  shutil.rmtree(external)
+  assert (root/'index.html').is_file()
+  assert not list(root.glob('*/*/record.json'))
+  assert requester.get(fp).json()['archive_state']=='offline'
+  assert admin.get(cp).json()['archive_state']=='offline'
+  assert admin.get(sp).json()['archive_state']=='offline'
+  for url in ['/api/attachments/'+str(file_id),cp+'/documents/runbook',sp+'/customer-email']:
+   response=admin.get(url);assert response.status_code==503
+   assert 'archived offline' in response.text and str(external) in response.text
+  for endpoint in ['/api/report','/api/internal/reports/cr','/api/internal/reports/sr']:
+   report=admin.get(endpoint+'?month=2024-01');assert report.status_code==200
+   assert 'offline' in report.text and str(external) in report.text
+  assert all(r['state']=='offline' for r in admin.get('/api/archive/status').json()['records'])
 
 
 def test_archive_target_required_and_calendar_year_cutoff(monkeypatch,tmp_path):
@@ -142,3 +167,30 @@ def test_cancelled_completed_date_active_records_and_space_guard(tmp_path,monkey
   assert admin.post('/api/archive/run',json={},headers=H).json()['item'] is None
   assert admin.get('/api/tickets/'+str(active)).json()['status']=='New'
   assert admin.get('/api/tickets/'+str(recent)).json()['archive_state']==''
+
+
+def test_offline_receipt_mismatch_preserves_online_source(tmp_path,monkeypatch):
+ import pytest
+ from fastapi import HTTPException
+ import app.archive as archive
+ root=tmp_path/'stage';root.mkdir();(root/MARKER).write_text(str(uuid.uuid4()))
+ monkeypatch.setenv('ARCHIVE_ROOT',str(root))
+ with TestClient(app) as admin:
+  login(admin,'admin@example.com')
+  cfg=admin.get('/api/settings').json()
+  fault=admin.post('/api/tickets',json=dict(title='Transfer verification',description='Must retain source on failure',category=cfg['categories'][0],domain=cfg['domains'][0],attachments=[dict(filename='Screenshot.png',data=base64.b64encode(PNG).decode())]),headers=H).json()
+  id=fault['id'];admin.post(f'/api/tickets/{id}/actions',json=dict(action='cancel',text='Withdrawn'),headers=H)
+  with Session(engine) as s:
+   for h in s.scalars(select(Entry).where(Entry.ticket_id==id)):h.created_at=datetime(2024,1,1)
+   s.commit()
+  item=archive.archive_one(engine)
+  receipt={'target':(root/MARKER).read_text(),'location':'E:/MOMCC_Archive','records':[{'folder':item['folder'],'manifest_sha256':'0'*64}]}
+  with pytest.raises(HTTPException):archive.finish_export(engine,receipt)
+  assert admin.get(f'/api/tickets/{id}').json()['archive_state']=='copied'
+  with Session(engine) as s:
+   file=s.scalar(select(Attachment).where(Attachment.ticket_id==id));assert (archive.upload_dir()/file.storage_name).exists()
+  receipt['records'][0]['manifest_sha256']=archive.digest(root/item['folder']/'manifest.json')
+  # Explicit verified export cleans online files without globally enabling purge.
+  archive.finish_export(engine,receipt)
+  with Session(engine) as s:assert not (archive.upload_dir()/file.storage_name).exists()
+  assert admin.get(f'/api/tickets/{id}').json()['archive_state']=='offline'

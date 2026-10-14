@@ -48,6 +48,12 @@ class ArchiveFile(Base):
     sha256=Column(String(64),nullable=False)
     __table_args__=(UniqueConstraint('kind','file_id'),)
 
+class ArchiveExport(Base):
+    __tablename__='archive_exports'
+    archive_id=Column(Integer,primary_key=True)
+    location=Column(String(1000),nullable=False)
+    exported_at=Column(DateTime,nullable=False,default=now)
+
 def cutoff():
     value=now()+timedelta(hours=8)
     try:value=value.replace(year=value.year-1)
@@ -56,12 +62,12 @@ def cutoff():
 
 def info(s,kind,id):
     key='archive_records_'+kind
-    if key not in s.info:s.info[key]={r.record_id:r for r in s.execute(select(ArchiveRecord.record_id,ArchiveRecord.state,ArchiveRecord.folder).where(ArchiveRecord.kind==kind))}
+    if key not in s.info:s.info[key]={r.record_id:r for r in s.execute(select(ArchiveRecord.record_id,ArchiveRecord.state,ArchiveRecord.folder,ArchiveExport.location).outerjoin(ArchiveExport,ArchiveExport.archive_id==ArchiveRecord.id).where(ArchiveRecord.kind==kind))}
     return s.info[key].get(id)
 
 def fields(s,kind,id):
     row=info(s,kind,id)
-    return [row.state,row.folder+'/index.html'] if row else ['','']
+    return [('offline' if row.location else row.state),(row.location+' / '+row.folder+'/index.html' if row.location else row.folder+'/index.html')] if row else ['','']
 
 def writable(s,kind,id):
     if s.scalar(select(ArchiveRecord).where(ArchiveRecord.kind==kind,ArchiveRecord.record_id==id).with_for_update()):raise HTTPException(409,'Archived records are read-only; the historical record is retained for reports')
@@ -90,6 +96,9 @@ def saved_path(s,kind,file_id):
     file=s.scalar(select(ArchiveFile).where(ArchiveFile.kind==kind,ArchiveFile.file_id==file_id))
     if not file:return None
     archive=s.execute(select(ArchiveRecord.target,ArchiveRecord.folder).where(ArchiveRecord.id==file.archive_id)).one()
+    exported=s.get(ArchiveExport,file.archive_id)
+    if exported:
+        raise HTTPException(503,'Attachment archived offline. Connect the archive disk and open its index.html. Location: '+exported.location+' / '+archive.folder)
     base,target=root()
     if archive.target!=target:raise HTTPException(503,'Connect the correct archive disk')
     path=base/archive.folder/file.path
@@ -275,12 +284,12 @@ def archive_one(engine,user_id=None):
         except Exception:
             s.rollback();shutil.rmtree(temp,ignore_errors=True);logger.exception('Archive copy failed; online attachments retained');raise
 
-def purge_one(engine,user_id=None):
-    if os.environ.get('ARCHIVE_PURGE_ENABLED','false').lower()!='true':raise HTTPException(409,'Online cleanup is disabled. Move and verify the archive on external storage first.')
+def purge_one(engine,user_id=None,*,export_id=None):
+    if export_id is None and os.environ.get('ARCHIVE_PURGE_ENABLED','false').lower()!='true':raise HTTPException(409,'Online cleanup is disabled. Move and verify the archive on external storage first.')
     base,target=root()
     with Session(engine) as s:
         lock(s)
-        archive=s.scalar(select(ArchiveRecord).where(ArchiveRecord.state=='copied').order_by(ArchiveRecord.id))
+        archive=s.get(ArchiveRecord,export_id) if export_id is not None else s.scalar(select(ArchiveRecord).where(ArchiveRecord.state=='copied').order_by(ArchiveRecord.id))
         if not archive:return None
         if archive.target!=target:raise HTTPException(409,'Wrong archive disk; cleanup stopped')
         verify(base/archive.folder)
@@ -334,7 +343,7 @@ def register(app):
         admin(user)
         try:root();available=True
         except HTTPException:available=False
-        return {'available':available,'eligible':sum(1 for _ in candidates(s)), 'records':[{'number':r.number,'kind':r.kind,'state':r.state,'path':r.folder+'/index.html'} for r in s.execute(select(ArchiveRecord.number,ArchiveRecord.kind,ArchiveRecord.state,ArchiveRecord.folder).order_by(ArchiveRecord.id.desc()))], 'purge_enabled':os.environ.get('ARCHIVE_PURGE_ENABLED','false').lower()=='true'}
+        return {'available':available,'eligible':sum(1 for _ in candidates(s)), 'records':[{'number':r.number,'kind':r.kind,'state':('offline' if r.location else r.state),'path':(r.location+' / ' if r.location else '')+r.folder+'/index.html'} for r in s.execute(select(ArchiveRecord.number,ArchiveRecord.kind,ArchiveRecord.state,ArchiveRecord.folder,ArchiveExport.location).outerjoin(ArchiveExport,ArchiveExport.archive_id==ArchiveRecord.id).order_by(ArchiveRecord.id.desc()))], 'purge_enabled':os.environ.get('ARCHIVE_PURGE_ENABLED','false').lower()=='true'}
     @app.post('/api/archive/run',dependencies=[Depends(write_guard)])
     def run(user:User=Depends(current_user)):
         admin(user)
@@ -345,3 +354,43 @@ def register(app):
         admin(user)
         from app.main import engine
         return {'item':purge_one(engine,user.id)}
+
+
+def finish_export(engine,receipt):
+    """Admin host helper: accept verified external-copy receipt, then clear local copies.
+
+    Receipt is created only by the explicit Windows transfer command after remote
+    hash verification. Local files are verified again before any online cleanup.
+    """
+    base,target=root()
+    if receipt.get('target')!=target:raise HTTPException(409,'Export target marker does not match staging')
+    location=receipt.get('location','')
+    if not isinstance(location,str) or not location or len(location)>1000:raise HTTPException(422,'Invalid export location')
+    done=[]
+    for item in receipt.get('records',[]):
+        with Session(engine) as s:
+            archive=s.scalar(select(ArchiveRecord).where(ArchiveRecord.folder==item['folder'],ArchiveRecord.target==target))
+            if not archive:raise HTTPException(409,'Unknown archive in export receipt')
+            archive_id=archive.id
+            exported=s.get(ArchiveExport,archive_id)
+            folder=base/archive.folder
+            if exported:
+                if folder.exists() and exported.location==location:
+                    verify(folder)
+                    if digest(folder/'manifest.json')!=item['manifest_sha256']:raise HTTPException(409,'Export retry verification failed')
+                    shutil.rmtree(folder)
+                continue
+            if not folder.resolve().is_relative_to(base.resolve()):raise HTTPException(409,'Invalid export path')
+            verify(folder)
+            if digest(folder/'manifest.json')!=item['manifest_sha256']:raise HTTPException(409,'External copy differs from staging; cleanup stopped')
+        purge_one(engine,export_id=archive_id)
+        with Session(engine) as s:
+            lock(s)
+            if not s.get(ArchiveExport,archive_id):s.add(ArchiveExport(archive_id=archive_id,location=location))
+            s.commit()
+        # Persist offline lookup before removing staging. A deletion failure is
+        # safe: leave the extra verified copy for an administrator to remove.
+        shutil.rmtree(folder)
+        done.append(item['folder'])
+    build_index(base)
+    return done
