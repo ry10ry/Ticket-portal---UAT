@@ -25,5 +25,7 @@ button.stat{text-align:left;font-weight:400}.sInprogress,.sInProgress{background
 #faultDescriptionEditor:focus{outline:2px solid #2357d8;outline-offset:2px}
 #faultDescriptionEditor table,#description table{border-collapse:collapse;white-space:normal;min-width:240px}
 #faultDescriptionEditor td,#faultDescriptionEditor th,#description td,#description th{border:1px solid #64748b;padding:8px;min-width:60px;vertical-align:top}
-#description{overflow-x:auto}.editor-help{color:#53627b;font-size:14px}
+#description{overflow-x:auto}
 @media(max-width:650px){#createDialog{padding:16px}#faultDescriptionEditor{min-height:220px}}
+
+#faultDescriptionEditor[data-empty="true"]::before{content:attr(data-placeholder);color:#6b7280;pointer-events:none;float:left;height:0;white-space:normal}
