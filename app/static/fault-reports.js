@@ -36,9 +36,8 @@ function renderFaultReports(container) {
         <tbody>${report.rows.map(row => `<tr><th scope="row">${escape(row.name)}</th><td>${row.month}</td><td>${row.total}</td></tr>`).join('')}</tbody>
         <tfoot><tr><th scope="row">Total</th><td>${report.totals.month}</td><td>${report.totals.total}</td></tr></tfoot>
       </table>`;
-      status.textContent = 'A transferred ticket counts once per Engineer who received it in each period. Older assignments are matched by recorded name.'
-        + (report.unmatched_legacy_entries
-          ? ` ${report.unmatched_legacy_entries} older assignment records could not be matched to a unique account.` : '');
+      status.textContent = '';
+      status.hidden = true;
       download.hidden = false;
     } catch (error) {
       status.textContent = report ? `${error.message} Showing the last successful result.` : error.message;
